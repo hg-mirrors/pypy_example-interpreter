@@ -1,4 +1,18 @@
 
+"""This file contains both an interpreter and "hints" in the interpreter code 
+necessary to construct a Jit.
+
+There are two required hints:
+1. JitDriver.jit_merge_point() at the start of the opcode dispatch loop
+2. JitDriver.can_enter_jit() at the end of loops (where they jump back to the start)
+
+These bounds and the "green" variables effectively mark loops and 
+allow the jit to decide if a loop is "hot" and in need of compiling.
+
+Read http://doc.pypy.org/en/latest/jit/pyjitpl5.html for details.
+
+"""
+
 from kermit.sourceparser import parse
 from kermit.bytecode import compile_ast
 from kermit import bytecode
@@ -17,6 +31,7 @@ class W_Root(object):
 
 class W_IntObject(W_Root):
     def __init__(self, intval):
+        assert(isinstance(intval, int))
         self.intval = intval
 
     def add(self, other):
@@ -35,12 +50,26 @@ class W_IntObject(W_Root):
     def str(self):
         return str(self.intval)
 
+
 class W_FloatObject(W_Root):
     def __init__(self, floatval):
-        self.floatval
+        assert(isinstance(floatval, float))
+        self.floatval = floatval
 
-    #def add(self, other):
-    #    xxxx
+    def add(self, other):
+        if not isinstance(other, W_FloatObject):
+            raise Exception("wrong type")
+        return W_FloatObject(self.floatval + other.floatval)
+
+    def lt(self, other): 
+        if not isinstance(other, W_FloatObject):
+            raise Exception("wrong type")
+        return W_IntObject(self.floatval < other.floatval)
+
+    def str(self):
+        return str(self.floatval)
+
+
 
 class Frame(object):
     _virtualizable_ = ['valuestack[*]', 'valuestack_pos', 'vars[*]']
@@ -72,12 +101,22 @@ def execute(frame, bc):
     code = bc.code
     pc = 0
     while True:
+        # required hint indicating this is the top of the opcode dispatch
         driver.jit_merge_point(pc=pc, code=code, bc=bc, frame=frame)
         c = ord(code[pc])
         arg = ord(code[pc + 1])
         pc += 2
         if c == bytecode.LOAD_CONSTANT:
-            frame.push(W_IntObject(bc.constants[arg]))
+            # these conversions to W_Objects should be done either once 
+            # at the start of execute() or better, as added bc.constants.
+            constant = bc.constants[arg]
+            if isinstance(constant, int):
+                w_constant = W_IntObject(constant)
+            elif isinstance(constant, float):
+                w_constant = W_FloatObject(constant)
+            else:
+                raise Exception("wrong type")
+            frame.push(w_constant)
         elif c == bytecode.DISCARD_TOP:
             frame.pop()
         elif c == bytecode.RETURN:
@@ -96,6 +135,7 @@ def execute(frame, bc):
                 pc = arg
         elif c == bytecode.JUMP_BACKWARD:
             pc = arg
+            # required hint indicating this is the end of a loop
             driver.can_enter_jit(pc=pc, code=code, bc=bc, frame=frame)
         elif c == bytecode.PRINT:
             item = frame.pop()
